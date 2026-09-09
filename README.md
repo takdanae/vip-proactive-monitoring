@@ -1,6 +1,6 @@
 # VIP Proactive Monitoring
 
-ระบบ monitoring แบบ proactive สำหรับตรวจสอบสถานะ fibre ทุกหมายเลขใน `fibre_list.txt`
+ระบบ monitoring แบบ proactive สำหรับตรวจสอบสถานะ fibre ทุกหมายเลขใน `fibre_list.json`
 โดยรวบรวมข้อมูลจาก **3 sources** พร้อมกัน และสรุป overall status ลงไฟล์ `output/summary.json`
 
 ---
@@ -20,7 +20,7 @@ graph TD
     AGG --> SUM["output/summary.json"]
     A --> DETAIL["output/result_XXXX.json\n(detailed per fibre)"]
 
-    IN["fibre_list.txt"] --> main
+    IN["fibre_list.json"] --> main
 ```
 
 **Overall status logic** (per fibre):
@@ -40,7 +40,7 @@ graph TD
 ```
 vip-proactive-monitoring/
 ├── main.py                          # Orchestrator — อ่าน fibre list, รัน 3 modules, สรุป summary
-├── fibre_list.txt                   # Input: หมายเลข fibre ทีละบรรทัด
+├── fibre_list.json                   # Input: หมายเลข fibre ทีละบรรทัด
 ├── .env                             # Credentials & config (git-ignored)
 ├── .env.example                     # Template สำหรับสร้าง .env
 ├── requirements.txt                 # Python dependencies
@@ -123,19 +123,32 @@ PASSWORD=your_password
 # NPAW_API_KEY=
 ```
 
-แก้ไข `fibre_list.txt` เพื่อกำหนด fibre IDs ที่ต้องการตรวจสอบ (10 หลัก ทีละบรรทัด):
+Edit `fibre_list.json` with confirmed flags. Example only:
 
+```json
+[
+  {"name": "VIP customer 1", "fibre_id": "8804133194", "mesh": 1, "playbox": 0},
+  {"name": "VIP customer 2", "fibre_id": "8801478464", "mesh": 0, "playbox": 1}
+]
 ```
-8800021298
-8800052568
-8801815340
-```
+
+`name` and IDs must be non-empty strings; leading zeros in IDs are preserved.
+Flags must be integer 0 or 1. Replace all migrated `null` flags with confirmed
+values before running. Unset flags fail validation before any checks start.
+Duplicate IDs, missing fields, malformed JSON, and empty lists are rejected.
+`fibre_list.txt` remains a migration reference and is never loaded at runtime.
+
+Airnet always runs. OneSense runs only with mesh=1; NPAW only with playbox=1.
+Disabled modules return N/A with a skip reason and make no requests.
+Enabled checks run concurrently per fibre, and fibres run sequentially.
+Summary entries include mesh and playbox. OneSense remains a stub until its API
+is provided; its future implementation must use the shared PAC request helper.
 
 ---
 
 ## Usage
 
-รัน main orchestrator (ตรวจสอบทุก fibre ใน fibre_list.txt):
+รัน main orchestrator (ตรวจสอบทุก fibre ใน fibre_list.json):
 
 ```bash
 python main.py
@@ -175,6 +188,7 @@ Console output จะแสดงตารางสรุปสถานะ:
   "status_counts": { "normal": 2, "abnormal": 1, "error": 0, "unknown": 0 },
   "fibres": [
     {
+      "name": "VIP customer 1",
       "fibre_id": "8800021298",
       "overall_status": "normal",
       "modules": {
@@ -230,3 +244,35 @@ Console output จะแสดงตารางสรุปสถานะ:
 2. แก้ `check()` function ให้ call API จริง (ใช้ `httpx` ที่ติดตั้งไว้แล้ว)
 3. Map response → `ModuleResult` โดยใช้ status `normal`/`abnormal`/`error`
 4. main.py ไม่ต้องแก้ไขใดๆ เลย
+
+
+## API proxy configuration
+
+NPAW uses `common.api_http.request()` and reads `API_PAC_URL` from `.env`.
+The PAC is fetched directly with a 15-second timeout and evaluated for the
+actual API URL and hostname. Following the supplied helper, only its first
+rule is used: `PROXY host:port` or `DIRECT`. Unsupported rules and PAC failures
+return a module error without silently bypassing the configured route.
+API requests use a 15-second connection timeout and a 60-second read timeout.
+Leave `API_PAC_URL` blank to use HTTPX's standard environment proxy settings.
+
+OneSense remains a stub until its API contract is available. Its future API
+requests must use `common.api_http.request()` so they use the same PAC routing.
+
+Install dependencies and run the offline proxy tests:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+
+
+## JSON input checklist
+
+- [x] Load and validate JSON fibre records before checks.
+- [x] Select OneSense/NPAW using mesh/playbox flags.
+- [x] Include flags and skip reasons in the summary.
+- [x] Test input validation, selection, and aggregation.
+- [ ] Supply confirmed device flags for all migrated fibres.
+- [ ] Integrate OneSense when its API is available, using the shared PAC helper.
