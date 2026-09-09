@@ -1,0 +1,26 @@
+[
+  {
+    "name": "fibre_list1",
+    "fibre_id": "8804133194",
+    "mesh": null,
+    "playbox": null
+  },
+  {
+    "name": "fibre_list2",
+    "fibre_id": "8801478464",
+    "mesh": null,
+    "playbox": null
+  },
+  {
+    "name": "fibre_list3",
+    "fibre_id": "8806756368",
+    "mesh": null,
+    "playbox": null
+  },
+  {
+    "name": "fibre_list4",
+    "fibre_id": "8806916302",
+    "mesh": null,
+    "playbox": null
+  }
+]
