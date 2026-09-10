@@ -1,6 +1,6 @@
 """vip-proactive-monitoring — main orchestrator.
 
-Reads fibre IDs from fibre_list.json, runs enabled monitoring modules
+Reads fibre records from Cloudflare D1, runs enabled monitoring modules
 (airnet, onesense, npaw) in parallel for each fibre, aggregates an overall
 status per fibre, and writes the consolidated result to output/summary.json.
 
@@ -8,6 +8,7 @@ Overall status logic (per fibre):
   - "normal"   : all active modules returned "normal"
   - "abnormal" : at least one active module returned "abnormal"
   - "error"    : at least one active module returned "error"
+  - "unknown"  : insufficient coverage, unless abnormal or error takes priority
   - Modules returning "N/A" are excluded from aggregation.
   - If ALL modules return "N/A" (no data), overall = "unknown".
 """
@@ -15,21 +16,24 @@ Overall status logic (per fibre):
 from __future__ import annotations
 
 import asyncio
+import argparse
+import time
 import json
 import logging
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import TypedDict
+from common.d1_fibres import FibreRecord, read_fibre_list
+from common.d1_logs import cleanup_logs, persist_run_log
 
 from modules.airnet.utils import setup_logging
 from common.models import ModuleResult
+from common.teams_notification import build_html_message, send_notification, NotificationError
 import modules.airnet as airnet
 import modules.onesense as onesense
 import modules.npaw as npaw
 
 OUTPUT_DIR = Path(__file__).parent / "output"
-FIBRE_LIST = Path(__file__).parent / "fibre_list.json"
 TZ_BKK = timezone(timedelta(hours=7))
 
 logger = logging.getLogger("vip-proactive-monitoring")
@@ -38,52 +42,15 @@ logger = logging.getLogger("vip-proactive-monitoring")
 _STATUS_PRIORITY: dict[str, int] = {
     "N/A":      0,
     "normal":   1,
-    "abnormal": 2,
-    "error":    3,
+    "unknown":  2,
+    "abnormal": 3,
+    "error":    4,
 }
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-class FibreRecord(TypedDict):
-    name: str
-    fibre_id: str
-    mesh: int
-    playbox: int
-
-
-def read_fibre_list(path: Path = FIBRE_LIST) -> list[FibreRecord]:
-    """Validate every JSON record before any monitoring requests start."""
-    try:
-        records = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Cannot load {path.name}: {exc}") from exc
-    if not isinstance(records, list) or not records:
-        raise ValueError(f"{path.name}: expected a non-empty JSON array")
-    seen = set()
-    for index, record in enumerate(records, 1):
-        label = f"{path.name}: record {index}"
-        if not isinstance(record, dict):
-            raise ValueError(f"{label}: expected an object")
-        for field in ("name", "fibre_id", "mesh", "playbox"):
-            if field not in record:
-                raise ValueError(f"{label}: missing required field {field}")
-        name = record["name"]
-        if not isinstance(name, str) or not name or name != name.strip():
-            raise ValueError(f"{label}: name must be a non-empty string without surrounding whitespace")
-        fid = record["fibre_id"]
-        if not isinstance(fid, str) or not fid or fid != fid.strip():
-            raise ValueError(f"{label}: fibre_id must be a non-empty string without surrounding whitespace")
-        if fid in seen:
-            raise ValueError(f"{label}: duplicate fibre_id {fid}")
-        seen.add(fid)
-        for flag in ("mesh", "playbox"):
-            if type(record[flag]) is not int or record[flag] not in (0, 1):
-                raise ValueError(f"{label} ({fid}): {flag} must be integer 0 or 1; set the confirmed device flag")
-    return records
-
 
 def aggregate_status(results: list[ModuleResult]) -> str:
     """
@@ -202,7 +169,7 @@ async def check_fibre(fibre: FibreRecord) -> list[ModuleResult]:
     selected = [("airnet", airnet.check)]
     skipped = {}
     for name, flag, checker in [("onesense", "mesh", onesense.check), ("npaw", "playbox", npaw.check)]:
-        if fibre[flag] == 1:
+        if fibre[flag] > 0:
             selected.append((name, checker))
         else:
             skipped[name] = ModuleResult(
@@ -248,23 +215,83 @@ async def run(fibres: list[FibreRecord]) -> dict:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    """CLI entry point — read fibre list and run full monitoring check."""
-    setup_logging()
+def run_once() -> int:
+    """Run cleanup and monitoring, preserving delivery after log failures."""
+    failed = False
+    try:
+        cleanup_logs()
+    except ValueError as exc:
+        logger.error('Log cleanup failed: %s', exc)
+        failed = True
     try:
         fibres = read_fibre_list()
     except ValueError as exc:
         logger.error("%s", exc)
-        sys.exit(1)
+        return 1
 
     logger.info("เริ่ม vip-proactive-monitoring — %d fibres", len(fibres))
     summary = asyncio.run(run(fibres))
+    summary['htmlMessage'] = build_html_message(summary)
 
     output_file = save_summary(summary)
     logger.info("บันทึก summary เสร็จแล้วที่: %s", output_file)
 
     print_summary(summary)
     print(f"📄 Summary saved to: {output_file}\n")
+
+
+    try:
+        persist_run_log(summary)
+    except ValueError as exc:
+        logger.error('Run log persistence failed: %s', exc)
+        failed = True
+
+    try:
+        if summary['htmlMessage']:
+            asyncio.run(send_notification(summary['htmlMessage']))
+        else:
+            logger.info('Teams notification skipped: no abnormal or error services')
+    except NotificationError as exc:
+        logger.error('%s', exc)
+        failed = True
+    return int(failed)
+
+
+def next_quarter_hour(now: datetime) -> datetime:
+    """Return the strictly next quarter-hour boundary."""
+    return now.replace(second=0, microsecond=0) + timedelta(minutes=15 - now.minute % 15)
+
+
+def run_scheduled(*, now=None, sleep=time.sleep) -> None:
+    """Run sequentially; elapsed boundaries never queue additional runs."""
+    now = now or (lambda: datetime.now(TZ_BKK))
+    while True:
+        current = now()
+        target = next_quarter_hour(current)
+        logger.info('Next monitoring run: %s', target.isoformat())
+        while current < target:
+            sleep((target - current).total_seconds())
+            current = now()
+        try:
+            if run_once():
+                logger.error('Monitoring cycle completed with failures')
+        except Exception:
+            logger.error('Monitoring cycle failed unexpectedly; continuing at next boundary')
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Run once by default, or remain active with --cron."""
+    parser = argparse.ArgumentParser(description='VIP proactive monitoring')
+    parser.add_argument('--cron', action='store_true', help='Run at each next 15-minute boundary (Bangkok time)')
+    args = parser.parse_args(argv)
+    setup_logging()
+    try:
+        if args.cron:
+            run_scheduled()
+        elif run_once():
+            sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info('Monitoring stopped')
 
 
 if __name__ == "__main__":

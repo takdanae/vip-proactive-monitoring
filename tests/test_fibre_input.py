@@ -1,7 +1,4 @@
-import json
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import main
@@ -9,48 +6,26 @@ from common.models import ModuleResult
 
 
 class InputTests(unittest.TestCase):
-    def test_validation(self):
-        valid = {'name': 'VIP customer', 'fibre_id': '00123', 'mesh': 0, 'playbox': 1}
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / 'fibres.json'
-            with self.assertRaisesRegex(ValueError, 'Cannot load'):
-                main.read_fibre_list(path)
-            path.write_text(json.dumps([valid]))
-            self.assertEqual(main.read_fibre_list(path), [valid])
-            cases = [([], 'non-empty'), ({}, 'non-empty'), ([1], 'object'),
-                     ([{}, valid], 'missing'), ([valid, valid], 'duplicate')]
-            for field in ['mesh', 'playbox']:
-                for value in [None, True, False, 1.0, '1', 2, -1]:
-                    cases.append(([dict(valid, **{field: value})], field))
-            for value in [None, 123, '', ' 00123']:
-                cases.append(([dict(valid, fibre_id=value)], 'fibre_id'))
-            for value in [None, 123, '', ' VIP customer']:
-                cases.append(([dict(valid, name=value)], 'name'))
-            for records, message in cases:
-                with self.subTest(records=records):
-                    path.write_text(json.dumps(records))
-                    with self.assertRaisesRegex(ValueError, message):
-                        main.read_fibre_list(path)
-            path.write_text('{')
-            with self.assertRaisesRegex(ValueError, 'Cannot load'):
-                main.read_fibre_list(path)
-
     def test_invalid_input_stops_cli(self):
-        with patch.object(main, 'setup_logging'), patch.object(main, 'read_fibre_list', side_effect=ValueError('invalid flags')), patch.object(main, 'run') as run:
-            with self.assertRaises(SystemExit):
-                main.main()
+        with patch.object(main, 'cleanup_logs'), patch.object(main, 'setup_logging'), patch.object(main, 'read_fibre_list', side_effect=ValueError('invalid counts')), patch.object(main, 'run') as run, patch.object(main, 'save_summary') as save:
+            with self.assertRaises(SystemExit) as error:
+                main.main([])
+            self.assertEqual(error.exception.code, 1)
             run.assert_not_called()
+            save.assert_not_called()
 
 
 class SelectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_flag_combinations(self):
-        for mesh, playbox in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        for mesh, playbox in [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (0, 3), (2, 3)]:
             fibre = dict(name='VIP customer', fibre_id='00123', mesh=mesh, playbox=playbox)
             mocks = {name: AsyncMock(return_value=ModuleResult(name, '00123', 'normal')) for name in ['airnet', 'onesense', 'npaw']}
             with patch.object(main.airnet, 'check', mocks['airnet']), patch.object(main.onesense, 'check', mocks['onesense']), patch.object(main.npaw, 'check', mocks['npaw']):
                 summary = await main.run([fibre])
             entry = summary['fibres'][0]
             self.assertEqual(entry['name'], 'VIP customer')
+            self.assertNotIn('first_name', entry)
+            self.assertNotIn('last_name', entry)
             self.assertEqual((entry['mesh'], entry['playbox']), (mesh, playbox))
             self.assertEqual(entry['overall_status'], 'normal')
             mocks['airnet'].assert_awaited_once_with('00123')

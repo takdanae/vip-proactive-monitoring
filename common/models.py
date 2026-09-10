@@ -13,7 +13,7 @@ from typing import Literal
 TZ_BKK = timezone(timedelta(hours=7))
 
 # Status values used across all modules.
-StatusLiteral = Literal["normal", "abnormal", "error", "N/A"]
+StatusLiteral = Literal["normal", "abnormal", "unknown", "error", "N/A"]
 
 
 @dataclass
@@ -26,6 +26,7 @@ class ModuleResult:
         status:     Summary status:
                       "normal"   — service is healthy / within expected range.
                       "abnormal" — service is degraded or has a fault.
+                      "unknown"  — monitoring coverage is insufficient.
                       "error"    — the module itself failed to retrieve data.
                       "N/A"      — module is not yet implemented / intentionally skipped.
         details:    Free-form dict with module-specific data (e.g. online_status, row_count).
