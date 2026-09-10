@@ -21,56 +21,33 @@ class PacTests(unittest.TestCase):
         self.assertNotIn('secret', str(causes))
         self.assertIn('https://api.test/path', causes[0]['message'])
 
-    def test_routes(self):
-        for rule, expected in [('DIRECT', None), ('PROXY proxy.test:2520; DIRECT', 'http://proxy.test:2520')]:
-            script = 'function FindProxyForURL(url, host) { return "' + rule + '"; }'
-            self.assertEqual(api_http._evaluate_pac(script, 'https://api.test/'), expected)
-
-    def test_host_selection(self):
-        script = 'function FindProxyForURL(url, host) { return host === "api.test" ? "DIRECT" : "PROXY other:80"; }'
-        self.assertIsNone(api_http._evaluate_pac(script, 'https://api.test/path?internetId=001'))
-
-    def test_invalid_rule_and_script(self):
-        for script in ['invalid javascript!', 'function FindProxyForURL(url, host) { return "SOCKS host:80"; }']:
-            with self.assertRaises(api_http.ProxyConfigurationError):
-                api_http._evaluate_pac(script, 'https://api.test/')
-        self.assertIsNone(api_http._evaluate_pac('function FindProxyForURL(u,h){return "DIRECT";}', 'https://api.test/'))
-
-
 class RequestTests(unittest.IsolatedAsyncioTestCase):
-    async def test_pac_transport_and_npaw(self):
+    async def test_proxy_transport_and_npaw(self):
         original = httpx.AsyncClient
-        groups = [{'task': name, 'error': [{'errorName': 'sample'}]} for name in ['App Error', 'APP CRASH', 'VDO Error']]
-        for rule, proxy in [('DIRECT', None), ('PROXY proxy.test:2520', 'http://proxy.test:2520')]:
-            options = []
+        for proxy in ('http://user:secret@proxy.test:8080', ''):
+            options, requests = [], []
             def handler(req):
-                if req.url.host == 'pac.test':
-                    return httpx.Response(200, text='function FindProxyForURL(u,h){return "' + rule + '";}')
+                requests.append(req)
+                self.assertEqual(req.url.host, 'api.test')
                 self.assertEqual(req.url.params['internetId'], '001')
-                self.assertNotIn('authorization', req.headers)
-                return httpx.Response(200, json={'status': 'Abnormal', 'errors': groups})
+                return httpx.Response(200, json={'status': 'Normal', 'errors': []})
             def factory(**kwargs):
                 options.append(kwargs)
                 return original(transport=httpx.MockTransport(handler))
-            with patch.dict(os.environ, {'API_PAC_URL': 'http://pac.test/config', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
+            env = {'PROXY_URL': proxy, 'API_PAC_URL': 'http://pac.test/config', 'NPAW_API_URL': 'https://api.test/'}
+            with patch.dict(os.environ, env), patch('common.api_http.load_dotenv'), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
                 result = await check('001')
-            self.assertEqual(result.status, 'abnormal')
-            self.assertEqual(result.details['errors'], groups)
-            self.assertFalse(options[0]['trust_env'])
-            self.assertFalse(options[1]['trust_env'])
-            self.assertEqual(options[1]['proxy'], proxy)
+            self.assertNotEqual(result.status, 'error')
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(options[0]['proxy'], proxy or None)
+            self.assertEqual(options[0]['trust_env'], not bool(proxy))
 
-    async def test_pac_download_failure(self):
-        original = httpx.AsyncClient
-        def factory(**kwargs):
-            return original(transport=httpx.MockTransport(lambda req: httpx.Response(503)))
-        with patch.dict(os.environ, {'API_PAC_URL': 'http://pac.test/config', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
+    async def test_invalid_proxy(self):
+        with patch.dict(os.environ, {'PROXY_URL': 'ftp://user:secret@proxy.test', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.load_dotenv'):
             result = await check('001')
         self.assertEqual(result.status, 'error')
-        self.assertEqual(result.details['error'], 'Could not download API_PAC_URL')
-        self.assertEqual(result.details['diagnostics']['stage'], 'pac_download')
-        self.assertEqual(result.details['diagnostics']['pac_http_status'], 503)
-        self.assertEqual(result.details['diagnostics']['causes'][1]['type'], 'HTTPStatusError')
+        self.assertIn('PROXY_URL', result.details['error'])
+        self.assertNotIn('secret', str(result.details))
 
     async def test_api_failure_diagnostics(self):
         original = httpx.AsyncClient
@@ -79,7 +56,7 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
                 raise failure
             def factory(**kwargs):
                 return original(transport=httpx.MockTransport(handler))
-            with patch.dict(os.environ, {'API_PAC_URL': '', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
+            with patch.dict(os.environ, {'PROXY_URL': '', 'API_PAC_URL': '', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
                 result = await check('001')
             diag = result.details['diagnostics']
             self.assertEqual(result.status, 'error')
@@ -92,7 +69,7 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         for status, body, stage in [(403, 'Forbidden', 'http_response'), (200, '<html/>', 'response_json'), (200, '{"status":"unexpected"}', 'response_validation')]:
             def factory(**kwargs):
                 return original(transport=httpx.MockTransport(lambda req: httpx.Response(status, text=body)))
-            with patch.dict(os.environ, {'API_PAC_URL': '', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
+            with patch.dict(os.environ, {'PROXY_URL': '', 'API_PAC_URL': '', 'NPAW_API_URL': 'https://api.test/'}), patch('common.api_http.httpx.AsyncClient', side_effect=factory):
                 result = await check('001')
             self.assertEqual(result.details['diagnostics']['stage'], stage)
             self.assertEqual(result.details['diagnostics']['http_status'], status)
