@@ -1,4 +1,4 @@
-"""OneSense monitoring module — REST API integration (future)."""
+"""OneSense monitoring module — Service Alerts API integration."""
 
 from modules.onesense.checker import check
 
