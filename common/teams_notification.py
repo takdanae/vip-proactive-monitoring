@@ -118,13 +118,14 @@ def _npaw_errors_html(errors: object) -> str:
             fragments.append(_pretty_json_html(group))
         elif task == 'VDO Error':
             rows = [
-                (_first_present(entry, 'errorCode', 'errorName'),
+                (entry.get('occurredAt'),
+                 _first_present(entry, 'errorCode', 'errorName'),
                  _description_or_message(entry), entry.get('title'),
-                 entry.get('device'), entry.get('occurredAt'))
+                 entry.get('device'))
                 for entry in entries
             ]
             fragments.extend(['<h4>Task: VDO Error</h4>', _table_html(
-                ('Error Code / Name', 'Description / Message', 'Title', 'Device', 'Occurred At'), rows)])
+                ('Occurred At', 'Error Code / Name', 'Description / Message', 'Title', 'Device'), rows)])
         elif task == 'App Error':
             rows = [
                 (_first_present(entry, 'errorName', 'errorCode'), entry.get('description'),

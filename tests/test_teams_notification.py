@@ -74,6 +74,11 @@ class FormattingTests(unittest.TestCase):
                      '80100005', 'jwttoken ajax error']:
             self.assertIn(text, html)
         self.assertNotIn('Errors:', html)
+        vdo_table = html.split('<h4>Task: VDO Error</h4>', 1)[1].split('</table>', 1)[0]
+        self.assertLess(vdo_table.index('<th>Occurred At</th>'),
+                        vdo_table.index('<th>Error Code / Name</th>'))
+        self.assertLess(vdo_table.index('<td>2026-09-10 15:57:43</td>'),
+                        vdo_table.index('<td>ERROR_CODE_IO_NETWORK_CONNECTION_FAILED (2001)</td>'))
 
     def test_npaw_unknown_shape_uses_escaped_pretty_json(self):
         value = summary()
