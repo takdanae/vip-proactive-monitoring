@@ -16,6 +16,10 @@ from common.api_http import ProxyConfigurationError, request
 logger = logging.getLogger(__name__)
 MAX_HTML_BYTES = 24 * 1024
 _SERVICES = [('airnet', 'Smart7'), ('npaw', 'NPAW'), ('onesense', 'OneSense')]
+_PROTECTED_DETAIL_KEYS = {
+    'api_key', 'authorization', 'cookie', 'cookies', 'diagnostics', 'headers',
+    'output_file', 'password', 'request', 'response', 'secret', 'token', 'url',
+}
 
 
 class NotificationError(RuntimeError):
@@ -36,8 +40,8 @@ def _detail(source: str, module: dict) -> str:
     details = module.get('details', {})
     if source == 'onesense':
         return str(details.get('reason', ''))
-    if source == 'npaw':
-        return 'Errors: ' + json.dumps(details.get('errors', []), ensure_ascii=False)
+    if source == 'airnet' and str(details.get('online_status', '')).strip().casefold() == 'offline':
+        return 'Router Offline'
     return ' / '.join(str(value) for value in [
         details.get('online_status'),
     ] if value is not None)
@@ -48,28 +52,159 @@ def _status(value: str) -> str:
     return f'<span style="color:{color}">{escape(value.lower())}</span>'
 
 
+def _visible_json_value(value: object) -> object:
+    """Remove operational data that is not safe to include in notifications."""
+    if isinstance(value, dict):
+        return {
+            key: _visible_json_value(item)
+            for key, item in value.items()
+            if str(key).casefold() not in _PROTECTED_DETAIL_KEYS
+        }
+    if isinstance(value, list):
+        return [_visible_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_visible_json_value(item) for item in value)
+    return value
+
+
+def _pretty_json_html(value: object) -> str:
+    """Format structured values safely in the constrained Teams HTML dialect."""
+    rendered = json.dumps(_visible_json_value(value), ensure_ascii=False, indent=2, default=str)
+    return '<pre style="white-space:pre-wrap;word-break:break-word">' + escape(rendered) + '</pre>'
+
+
+def _value_html(value: object) -> str:
+    return escape(str(value)) if value is not None and value != '' else '-'
+
+
+def _table_html(headers: tuple[str, ...], rows: list[tuple[object, ...]]) -> str:
+    head = ''.join(f'<th>{escape(header)}</th>' for header in headers)
+    body = ''.join(
+        '<tr>' + ''.join(f'<td>{_value_html(value)}</td>' for value in row) + '</tr>'
+        for row in rows
+    )
+    return '<table><tr>' + head + '</tr>' + body + '</table>'
+
+
+def _first_present(item: dict, *keys: str) -> object:
+    for key in keys:
+        value = item.get(key)
+        if value is not None and value != '':
+            return value
+    return None
+
+
+def _description_or_message(item: dict) -> object:
+    values = []
+    for key in ('description', 'message'):
+        value = item.get(key)
+        if value is not None and value != '' and value not in values:
+            values.append(value)
+    return ' / '.join(str(value) for value in values) if values else None
+
+
+def _npaw_errors_html(errors: object) -> str:
+    """Render known NPAW tasks as compact tables, retaining unknown shapes as JSON."""
+    groups = errors if isinstance(errors, list) else [errors]
+    fragments = ['<h4>NPAW error details</h4>']
+    if not groups:
+        return ''.join(fragments) + _pretty_json_html(groups)
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get('error'), list):
+            fragments.append(_pretty_json_html(group))
+            continue
+        task, entries = group.get('task'), group['error']
+        if not all(isinstance(entry, dict) for entry in entries):
+            fragments.append(_pretty_json_html(group))
+        elif task == 'VDO Error':
+            rows = [
+                (_first_present(entry, 'errorCode', 'errorName'),
+                 _description_or_message(entry), entry.get('title'),
+                 entry.get('device'), entry.get('occurredAt'))
+                for entry in entries
+            ]
+            fragments.extend(['<h4>Task: VDO Error</h4>', _table_html(
+                ('Error Code / Name', 'Description / Message', 'Title', 'Device', 'Occurred At'), rows)])
+        elif task == 'App Error':
+            rows = [
+                (_first_present(entry, 'errorName', 'errorCode'), entry.get('description'),
+                 entry.get('metadata'), entry.get('count'))
+                for entry in entries
+            ]
+            fragments.extend(['<h4>Task: App Error</h4>', _table_html(
+                ('Error Name / Code', 'Description', 'Metadata', 'Count'), rows)])
+        else:
+            fragments.append(_pretty_json_html(group))
+    return ''.join(fragments)
+
+
+def _bangkok_datetime(value: object) -> object:
+    """Format timezone-aware timestamps without guessing for invalid values."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        return value
+    return parsed.astimezone(timezone(timedelta(hours=7))).strftime('%Y-%m-%d %H:%M:%S (UTC+7)')
+
+
+def _onesense_display_detail(value: object) -> object:
+    """Build a display copy, keeping the stored incident payload intact."""
+    if isinstance(value, dict):
+        return {key: _onesense_display_detail(item) for key, item in value.items()
+                if key not in {'packets_lost_unit', 'effective_problem_seconds'}}
+    if isinstance(value, list):
+        return [_onesense_display_detail(item) for item in value]
+    return _bangkok_datetime(value)
+
+
+def _onesense_detail_html(detail: dict) -> str:
+    rendered = json.dumps(_visible_json_value(_onesense_display_detail(detail)),
+                          ensure_ascii=False, indent=2, default=str)
+    # Plain HTML avoids clients turning <pre> into a numbered code editor.
+    lines = []
+    for line in rendered.split('\n'):
+        indentation = len(line) - len(line.lstrip(' '))
+        lines.append('&nbsp;' * indentation + escape(line[indentation:]))
+    return ('<div style="font-family:monospace;white-space:normal;overflow-wrap:anywhere;word-break:break-word">'
+            + '<br>'.join(lines) + '</div>')
+
+
+def _duration_label(seconds: int | float | None) -> str | None:
+    """Show completed minutes, omitting empty day/hour components."""
+    if seconds is None:
+        return None
+    if seconds == 0:
+        return '0 minutes'
+    if seconds < 60:
+        return 'Less than 1 minute'
+    days, minutes = divmod(int(seconds // 60), 1440)
+    hours, minutes = divmod(minutes, 60)
+    return ' '.join(f'{amount} {unit}' + ('s' if amount != 1 else '')
+                    for amount, unit in ((days, 'day'), (hours, 'hour'), (minutes, 'minute'))
+                    if amount)
+
+
 def _alert_html(alert: dict) -> str:
-    fields = [('Alert ID', alert.get('alert_id')), ('Type', alert.get('type')),
-              ('Severity', alert.get('severity')), ('Target', alert.get('target')),
-              ('Agent', alert.get('agent_id')), ('ISP', alert.get('isp')),
-              ('Incident state', alert.get('status')), ('Start', alert.get('start_time')),
-              ('End', alert.get('end_time') or 'Still open'),
-              ('Duration', f"{alert.get('duration_seconds')} s"),
-              ('Overlap', f"{alert.get('overlap_seconds')} s")]
-    detail = alert.get('detail', {})
-    fields.append(('Summary', detail.get('summary')))
-    for key, label, unit in (
-        ('last_avg_ping_ms', 'Latest latency', 'ms'),
-        ('threshold_ms', 'Latency threshold', 'ms'),
-        ('worst_avg_ping_ms', 'Worst latency', 'ms'),
-        ('max_packets_lost', 'Maximum loss', '%'),
-        ('effective_problem_seconds', 'Effective problem time', 's'),
-        ('last_metric_at', 'Latest metric at', ''),
-        ('metric_scope', 'Metric scope', ''),
-    ):
-        if detail.get(key) is not None:
-            fields.append((label, f'{detail[key]} {unit}'.strip()))
-    return '<p>' + '<br>'.join(f'{label}: {escape(str(value))}' for label, value in fields if value is not None) + '</p>'
+    """Render the requested OneSense incident fields without exposing traceroutes."""
+    fields = [
+        ('Type', alert.get('type')), ('Severity', alert.get('severity')),
+        ('Target', alert.get('target')), ('ISP', alert.get('isp')),
+        ('Incident state', alert.get('status')), ('Start', _bangkok_datetime(alert.get('start_time'))),
+        ('End', _bangkok_datetime(alert.get('end_time'))),
+        ('Duration', _duration_label(alert.get('duration_seconds'))),
+    ]
+    rows = ''.join(
+        f'<tr><td>{escape(label)}</td><td>{_value_html(value)}</td></tr>'
+        for label, value in fields
+    )
+    detail = alert.get('detail')
+    detail_html = _onesense_detail_html(detail) if isinstance(detail, dict) else '-'
+    return ('<table><tr><th>Field</th><th>Value</th></tr>' + rows
+            + f'<tr><td>Detail</td><td>{detail_html}</td></tr></table>')
 
 
 def _blocks(summary: dict, alert_limits: dict) -> list[str]:
@@ -82,6 +217,8 @@ def _blocks(summary: dict, alert_limits: dict) -> list[str]:
                 continue
             detail = _detail(source, module)
             extra = ''
+            if source == 'npaw' and module['status'] != 'error':
+                extra += _npaw_errors_html(module.get('details', {}).get('errors', []))
             if source == 'onesense':
                 details = module.get('details', {})
                 # Only checker-generated, fixed failure descriptions are exposed.

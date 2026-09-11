@@ -42,7 +42,7 @@ class FormattingTests(unittest.TestCase):
         for text in ['Name: VIP &lt;A&gt;&amp;<br>', 'Fibre ID: 001<br>',
                      'Status: <span style="color:red">abnormal</span><br>', '<tr><th>Service</th><th>Detail</th></tr>',
                      'Online', 'insufficient_measurement_coverage',
-                     'Errors: ' + escape(json.dumps(errors, ensure_ascii=False))]:
+                     '<h4>NPAW error details</h4>', '<pre style="white-space:pre-wrap;word-break:break-word">']:
             self.assertIn(text, html)
         self.assertLess(html.index('Smart7'), html.index('NPAW'))
         self.assertLess(html.index('NPAW'), html.index('OneSense'))
@@ -51,18 +51,64 @@ class FormattingTests(unittest.TestCase):
         self.assertNotIn('SECRET', html)
         self.assertEqual(value, original)
 
-    def test_npaw_error_content(self):
-        for source in ('npaw',):
-            for errors in ([], ['Playback <failed>'], [{'code': 42, 'message': '\u0e44\u0e17\u0e22<&', 'context': {'devices': [1, 2]}}]):
-                with self.subTest(source=source, errors=errors):
-                    value = summary()
-                    value['fibres'][0]['modules'] = {
-                        source: {'status': 'abnormal', 'details': {'errors': errors}},
-                    }
-                    self.assertIn('Errors: ' + escape(json.dumps(errors, ensure_ascii=False)),
-                                  teams.build_html_message(value))
-            value['fibres'][0]['modules'][source]['details'] = {}
-            self.assertIn('Errors: []', teams.build_html_message(value))
+    def test_npaw_renders_vdo_and_app_errors_as_task_tables(self):
+        value = summary()
+        value['fibres'][0]['modules'] = {
+            'npaw': {'status': 'abnormal', 'details': {'errors': [
+                {'task': 'VDO Error', 'error': [{
+                    'errorCode': 'ERROR_CODE_IO_NETWORK_CONNECTION_FAILED (2001)',
+                    'description': 'HttpDataSourceException <failed>', 'title': '\u0e44\u0e17\u0e22',
+                    'device': 'Android', 'occurredAt': '2026-09-10 15:57:43',
+                }]},
+                {'task': 'App Error', 'error': [{
+                    'errorName': '80100005', 'description': 'can not get new jwtToken!',
+                    'metadata': 'jwttoken ajax error', 'count': 1,
+                }]},
+            ]}},
+        }
+        html = teams.build_html_message(value)
+        for text in ['<h4>Task: VDO Error</h4>', 'Error Code / Name',
+                     'Description / Message', 'Occurred At',
+                     'HttpDataSourceException &lt;failed&gt;', '\u0e44\u0e17\u0e22',
+                     '<h4>Task: App Error</h4>', 'Error Name / Code', 'Metadata',
+                     '80100005', 'jwttoken ajax error']:
+            self.assertIn(text, html)
+        self.assertNotIn('Errors:', html)
+
+    def test_npaw_unknown_shape_uses_escaped_pretty_json(self):
+        value = summary()
+        value['fibres'][0]['modules'] = {
+            'npaw': {'status': 'abnormal', 'details': {'errors': [
+                {'task': 'Unexpected', 'payload': {'message': '<failed>&'},
+                 'diagnostics': {'url': 'SECRET_URL', 'token': 'SECRET_TOKEN'}},
+            ]}},
+        }
+        html = teams.build_html_message(value)
+        self.assertIn('<pre style="white-space:pre-wrap;word-break:break-word">', html)
+        self.assertIn('&quot;task&quot;: &quot;Unexpected&quot;', html)
+        self.assertIn('&lt;failed&gt;&amp;', html)
+        self.assertNotIn('SECRET', html)
+
+    def test_onesense_incident_uses_field_table_and_pretty_detail(self):
+        value = summary()
+        value['fibres'][0]['modules'] = {
+            'onesense': {'status': 'abnormal', 'details': {'alerts': [{
+                'alert_id': 12088, 'type': 'HIGH_LATENCY', 'severity': 'MINOR',
+                'target': '176.109.89.10', 'isp': 'AIS FIBRE', 'status': 'OPEN',
+                'start_time': '2026-09-10T16:06:08+07:00', 'end_time': None,
+                'duration_seconds': 170, 'detail': {
+                    'summary': '\u0e44\u0e17\u0e22 <detected>&', 'nested': {'threshold_ms': 200},
+                },
+            }]}},
+        }
+        html = teams.build_html_message(value)
+        for text in ['<tr><th>Field</th><th>Value</th></tr>',
+                     'Type', 'HIGH_LATENCY', 'Severity', 'MINOR', 'Target',
+                     'ISP', 'Incident state', 'Start', '<td>End</td><td>-</td>',
+                     'Duration', '2 minutes', 'Detail',
+                     '&quot;summary&quot;: &quot;\u0e44\u0e17\u0e22 &lt;detected&gt;&amp;&quot;',
+                     '&quot;nested&quot;: {']:
+            self.assertIn(text, html)
 
     def test_filter_and_empty_errors(self):
         value = summary()
@@ -73,7 +119,8 @@ class FormattingTests(unittest.TestCase):
         healthy['modules']['npaw']['status'] = 'normal'
         value['fibres'].append(healthy)
         html = teams.build_html_message(value)
-        self.assertIn('Errors: []', html)
+        self.assertIn('<h4>NPAW error details</h4>', html)
+        self.assertIn('<pre style="white-space:pre-wrap;word-break:break-word">[]</pre>', html)
         for text in ['Smart7', 'OneSense', 'Healthy customer', 'healthy', 'Status: Normal']:
             self.assertNotIn(text, html)
         value['fibres'][0]['modules']['npaw']['status'] = 'normal'

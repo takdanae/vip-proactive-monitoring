@@ -131,11 +131,54 @@ class MessageTests(unittest.TestCase):
         value = self.summary()
         original = copy.deepcopy(value)
         html = build_html_message(value)
-        for text in ('<b>VIP proactive monitoring</b>', '2026-09-10 10:57:13 (UTC+7)', '<span style="color:red">abnormal</span>', 'Timeout &lt;detected&gt;', '100 %', 'agent-a', 'CLOSED', '120 s'):
+        for text in ('<b>VIP proactive monitoring</b>', '2026-09-10 10:57:13 (UTC+7)', '<span style="color:red">abnormal</span>',
+                     '<tr><th>Field</th><th>Value</th></tr>',
+                     'PING_TIMEOUT', 'CLOSED', '2 minutes', 'Timeout &lt;detected&gt;',
+                     '&quot;max_packets_lost&quot;: 100'):
             self.assertIn(text, html)
         self.assertNotIn('42 rows', html)
         self.assertNotIn('PRIVATE_TRACE', html)
         self.assertEqual(original, value)
+
+    def test_duration_in_days_hours_minutes(self):
+        value = self.summary()
+        incident = value['fibres'][0]['modules']['onesense']['details']['alerts'][0]
+        for seconds, expected in [(90060, '1 day 1 hour 1 minute'),
+                                  (172920, '2 days 2 minutes'),
+                                  (3600, '1 hour'), (170, '2 minutes'),
+                                  (59, 'Less than 1 minute'), (0, '0 minutes'),
+                                  (None, '-')]:
+            with self.subTest(seconds=seconds):
+                incident['duration_seconds'] = seconds
+                self.assertIn(f'<td>Duration</td><td>{expected}</td>', build_html_message(value))
+                self.assertEqual(incident['duration_seconds'], seconds)
+
+    def test_smart7_offline_label(self):
+        value = self.summary()
+        html = build_html_message(value)
+        self.assertIn('<p>Router Offline</p>', html)
+        self.assertEqual(value['fibres'][0]['modules']['airnet']['details']['online_status'], 'Offline')
+
+    def test_compact_detail_and_bangkok_dates(self):
+        value = self.summary()
+        incident = value['fibres'][0]['modules']['onesense']['details']['alerts'][0]
+        incident.update(start_time='2026-09-10T20:00:00Z', end_time=None)
+        incident['detail'].update(packets_lost_unit='percent', effective_problem_seconds=15,
+                                 last_metric_at='2026-09-11T03:01:00+07:00')
+        original = copy.deepcopy(value)
+        html = build_html_message(value)
+        self.assertNotIn('<h4>Incident', html)
+        self.assertNotIn('<pre', html)
+        self.assertIn('<td>End</td><td>-</td>', html)
+        self.assertIn('2026-09-11 03:00:00 (UTC+7)', html)
+        self.assertIn('2026-09-11 03:01:00 (UTC+7)', html)
+        self.assertNotIn('packets_lost_unit', html)
+        self.assertNotIn('effective_problem_seconds', html)
+        self.assertIn('&quot;max_packets_lost&quot;: 100', html)
+        self.assertIn('<br>', html)
+        self.assertEqual(original, value)
+        incident['end_time'] = '2026-09-11T04:00:00+08:00'
+        self.assertIn('<td>End</td><td>2026-09-11 03:00:00 (UTC+7)</td>', build_html_message(value))
 
     def test_unknown_and_aggregation(self):
         value = self.summary('unknown')
