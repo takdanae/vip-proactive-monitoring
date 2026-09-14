@@ -42,6 +42,10 @@ def _detail(source: str, module: dict) -> str:
         return str(details.get('reason', ''))
     if source == 'airnet' and str(details.get('online_status', '')).strip().casefold() == 'offline':
         return 'Router Offline'
+    if source == 'airnet' and module['status'] == 'abnormal':
+        recent = details.get('recent_offline_rows')
+        if isinstance(recent, int) and recent >= 3:
+            return f'{recent} recent offline records within 30 minutes'
     return ' / '.join(str(value) for value in [
         details.get('online_status'),
     ] if value is not None)
@@ -264,7 +268,11 @@ def build_html_message(summary: dict) -> str:
     if not blocks:
         return ''
     finished = datetime.fromisoformat(summary['finished_at']).astimezone(timezone(timedelta(hours=7)))
-    header = ('<b>VIP proactive monitoring</b><br>'
+    test_scenario = summary.get('testScenario')
+    title = 'VIP proactive monitoring'
+    if test_scenario:
+        title += f' — TEST: {escape(str(test_scenario))}'
+    header = (f'<b>{title}</b><br>'
               + finished.strftime('%Y-%m-%d %H:%M:%S') + ' (UTC+7)<br>'
               + f'Status: {_status(run_status(summary))}<br><br>')
     def size():

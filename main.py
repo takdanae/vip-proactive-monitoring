@@ -35,6 +35,11 @@ import modules.npaw as npaw
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 TZ_BKK = timezone(timedelta(hours=7))
+TEST_SCENARIOS = (
+    "smart7-offline", "smart7-recent-offlines", "smart7-error",
+    "npaw-errors", "npaw-long-metadata", "npaw-oversize-metadata", "npaw-error",
+    "onesense-alerts", "onesense-error", "all-errors", "all-abnormal",
+)
 
 logger = logging.getLogger("vip-proactive-monitoring")
 
@@ -51,6 +56,13 @@ _STATUS_PRIORITY: dict[str, int] = {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def configure_console_output() -> None:
+    """Allow the Unicode monitoring summary on legacy Windows console encodings."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
 
 def aggregate_status(results: list[ModuleResult]) -> str:
     """
@@ -101,6 +113,15 @@ def save_summary(summary: dict) -> Path:
     """Write summary dict to output/summary.json."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_file = OUTPUT_DIR / "summary.json"
+    with output_file.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    return output_file
+
+
+def save_test_summary(summary: dict) -> Path:
+    """Write an isolated test-scenario summary without replacing live output."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_file = OUTPUT_DIR / "test-summary.json"
     with output_file.open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     return output_file
@@ -211,6 +232,105 @@ async def run(fibres: list[FibreRecord]) -> dict:
     return build_summary(fibres, all_results, started_at)
 
 
+def build_test_summary(scenario: str) -> dict:
+    """Create one safe, representative result set for Teams message testing."""
+    fibre_id = "TEST-001"
+    fibre: FibreRecord = {
+        "name": f"TEST — {scenario}", "fibre_id": fibre_id,
+        "mesh": 1, "playbox": 1,
+    }
+    modules = {
+        "airnet": ModuleResult("airnet", fibre_id, "normal", {"online_status": "Online"}),
+        "onesense": ModuleResult("onesense", fibre_id, "normal", {"alerts": []}),
+        "npaw": ModuleResult("npaw", fibre_id, "normal", {"errors": []}),
+    }
+
+    if scenario == "smart7-offline":
+        modules["airnet"] = ModuleResult("airnet", fibre_id, "abnormal", {"online_status": "Offline"})
+    elif scenario == "smart7-recent-offlines":
+        modules["airnet"] = ModuleResult(
+            "airnet", fibre_id, "abnormal", {"online_status": "Online", "recent_offline_rows": 3},
+        )
+    elif scenario == "smart7-error":
+        modules["airnet"] = ModuleResult("airnet", fibre_id, "error", {"error": "Test retrieval failure"})
+    elif scenario == "npaw-errors":
+        modules["npaw"] = ModuleResult("npaw", fibre_id, "abnormal", {"errors": [
+            {"task": "VDO Error", "error": [{
+                "errorCode": "ERROR_CODE_IO_NETWORK_CONNECTION_FAILED (2001)",
+                "description": "HttpDataSourceException", "title": "Test video",
+                "device": "Android", "occurredAt": "2026-09-11 10:00:00",
+            }]},
+            {"task": "App Error", "error": [{
+                "errorName": "TEST_APP_ERROR", "description": "Test application error",
+                "metadata": "test scenario", "count": 1,
+            }]},
+        ]})
+    elif scenario == "npaw-long-metadata":
+        modules["npaw"] = ModuleResult("npaw", fibre_id, "abnormal", {"errors": [{
+            "task": "App Error", "error": [{
+                "errorName": "TEST_LONG_METADATA", "description": "Test long metadata",
+                "metadata": "LONG_METADATA_" * 500, "count": 1,
+            }],
+        }]})
+    elif scenario == "npaw-oversize-metadata":
+        modules["npaw"] = ModuleResult("npaw", fibre_id, "abnormal", {"errors": [{
+            "task": "App Error", "error": [{
+                "errorName": "TEST_OVERSIZE_METADATA", "description": "Test oversize metadata",
+                "metadata": "OVERSIZE_METADATA_" * 2000, "count": 1,
+            }],
+        }]})
+    elif scenario == "npaw-error":
+        modules["npaw"] = ModuleResult("npaw", fibre_id, "error", {"error": "Test retrieval failure"})
+    elif scenario == "onesense-alerts":
+        modules["onesense"] = ModuleResult("onesense", fibre_id, "abnormal", {"alerts": [
+            {
+                "alert_id": 10001, "type": "HIGH_LATENCY", "severity": "MINOR",
+                "target": "test.example.com", "isp": "Test ISP", "status": "OPEN",
+                "start_time": "2026-09-11T10:00:00+07:00", "end_time": None,
+                "duration_seconds": 170, "detail": {"summary": "Test high latency", "threshold_ms": 200},
+            },
+            {
+                "alert_id": 10002, "type": "PING_TIMEOUT", "severity": "MAJOR",
+                "target": "test.example.com", "isp": "Test ISP", "status": "CLOSED",
+                "start_time": "2026-09-11T09:40:00+07:00", "end_time": "2026-09-11T09:45:00+07:00",
+                "duration_seconds": 300, "detail": {"summary": "Test ping timeout"},
+            },
+        ]})
+    elif scenario == "onesense-error":
+        modules["onesense"] = ModuleResult(
+            "onesense", fibre_id, "error", {"error": "OneSense API request timed out", "alerts": []},
+        )
+    elif scenario == "all-errors":
+        modules = {
+            source: ModuleResult(source, fibre_id, "error", {"error": "Test retrieval failure"})
+            for source in ("airnet", "onesense", "npaw")
+        }
+    elif scenario == "all-abnormal":
+        modules = {
+            "airnet": ModuleResult(
+                "airnet", fibre_id, "abnormal", {"online_status": "Online", "recent_offline_rows": 3},
+            ),
+            "npaw": ModuleResult("npaw", fibre_id, "abnormal", {"errors": [{
+                "task": "App Error", "error": [{
+                    "errorName": "TEST_ALL_ABNORMAL", "description": "Test app error",
+                    "metadata": "test scenario", "count": 1,
+                }],
+            }]}),
+            "onesense": ModuleResult("onesense", fibre_id, "abnormal", {"alerts": [{
+                "alert_id": 10003, "type": "HIGH_LATENCY", "severity": "MINOR",
+                "target": "test.example.com", "isp": "Test ISP", "status": "OPEN",
+                "start_time": "2026-09-11T10:00:00+07:00", "end_time": None,
+                "duration_seconds": 170, "detail": {"summary": "Test high latency"},
+            }]}),
+        }
+    else:
+        raise ValueError(f"Unknown test scenario: {scenario}")
+
+    summary = build_summary([fibre], [[modules[name] for name in ("airnet", "onesense", "npaw")]], datetime.now(tz=TZ_BKK))
+    summary["testScenario"] = scenario
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -257,6 +377,25 @@ def run_once() -> int:
     return int(failed)
 
 
+def run_test_scenario(scenario: str, *, send_teams: bool = False) -> int:
+    """Render one test scenario without using monitoring or D1 services."""
+    summary = build_test_summary(scenario)
+    summary["htmlMessage"] = build_html_message(summary)
+    output_file = save_test_summary(summary)
+    logger.info("Saved test scenario summary to: %s", output_file)
+    print_summary(summary)
+    print(f"📄 Test summary saved to: {output_file}\n")
+    if not send_teams:
+        logger.info("Teams notification skipped: pass --send-teams to deliver this test scenario")
+        return 0
+    try:
+        asyncio.run(send_notification(summary["htmlMessage"]))
+    except NotificationError as exc:
+        logger.error("%s", exc)
+        return 1
+    return 0
+
+
 def next_quarter_hour(now: datetime) -> datetime:
     """Return the strictly next quarter-hour boundary."""
     return now.replace(second=0, microsecond=0) + timedelta(minutes=15 - now.minute % 15)
@@ -283,10 +422,22 @@ def main(argv: list[str] | None = None) -> None:
     """Run once by default, or remain active with --cron."""
     parser = argparse.ArgumentParser(description='VIP proactive monitoring')
     parser.add_argument('--cron', action='store_true', help='Run at each next 15-minute boundary (Bangkok time)')
+    parser.add_argument('--test-scenario', choices=TEST_SCENARIOS,
+                        help='Render a safe simulated Teams notification without live monitoring')
+    parser.add_argument('--send-teams', action='store_true',
+                        help='Deliver a --test-scenario notification using POWER_AUTOMATE_URL')
     args = parser.parse_args(argv)
+    if args.send_teams and not args.test_scenario:
+        parser.error('--send-teams requires --test-scenario')
+    if args.cron and args.test_scenario:
+        parser.error('--cron cannot be used with --test-scenario')
+    configure_console_output()
     setup_logging()
     try:
-        if args.cron:
+        if args.test_scenario:
+            if run_test_scenario(args.test_scenario, send_teams=args.send_teams):
+                sys.exit(1)
+        elif args.cron:
             run_scheduled()
         elif run_once():
             sys.exit(1)

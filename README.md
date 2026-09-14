@@ -361,6 +361,26 @@ verify the affected-fibre tables and API details in Teams and the flow history.
 A healthy run should produce no post.
 The offline test suite uses mocked delivery and sends no Teams messages.
 
+### Testing Teams message scenarios
+
+Use a simulated scenario to review the exact Teams HTML without calling live
+monitoring APIs or D1. Test runs write `output/test-summary.json` and do not
+send a message unless `--send-teams` is explicitly supplied:
+
+```bash
+python main.py --test-scenario npaw-errors
+python main.py --test-scenario all-errors --send-teams
+```
+
+Available scenarios are `smart7-offline`, `smart7-recent-offlines`,
+`smart7-error`, `npaw-errors`, `npaw-long-metadata`,
+`npaw-oversize-metadata`, `npaw-error`, `onesense-alerts`, `onesense-error`,
+`all-errors`, and `all-abnormal`. The recent-offline scenario represents three
+Historical Usage offline rows in 30 minutes. The oversize-metadata scenario
+verifies the 24 KiB Teams HTML limit. Test messages include a
+`TEST: <scenario>` label. Before adding `--send-teams`, set
+`POWER_AUTOMATE_URL` to a Flow that posts only to a test chat or channel.
+
 ## API proxy configuration
 
 D1, NPAW, and OneSense use `common.api_http.request()`, which reads `PROXY_URL`
@@ -469,7 +489,7 @@ inserts are reported and are not automatically retried or backfilled.
 ### Airnet abnormal rules
 
 Airnet is abnormal when either the portal status equals `Offline`
-(case-insensitive), or at least five Historical Usage rows have an `Offline
+(case-insensitive), or at least three Historical Usage rows have an `Offline
 Time` in the last 30 minutes. The window includes both endpoints, uses Bangkok
 time, and is relative to the check start captured before scraping, rounded down
 to the minute. Timestamps use `DD/MM/YYYY HH:MM`. Duplicate rows count separately.

@@ -22,15 +22,13 @@ TZ_BKK = timezone(timedelta(hours=7))
 
 _OFFLINE_TIME_COL = "Offline Time"
 _OFFLINE_WINDOW_MINUTES = 30
-_OFFLINE_COUNT_THRESHOLD = 5
+_OFFLINE_COUNT_THRESHOLD = 3
 _OFFLINE_TIME_FMT = "%d/%m/%Y %H:%M"
 
 
-def _check_offline_time_abnormal(rows: list[dict], now: datetime) -> bool:
+def _count_recent_offline_rows(rows: list[dict], now: datetime) -> int:
     """
-    Return True if ≥ _OFFLINE_COUNT_THRESHOLD rows in *rows* have an
-    "Offline Time" value that falls within the last _OFFLINE_WINDOW_MINUTES
-    minutes relative to *now*.
+    Count rows in *rows* whose "Offline Time" is within the recent window.
 
     Rows with a missing, empty, or un-parseable "Offline Time" are skipped.
 
@@ -39,7 +37,7 @@ def _check_offline_time_abnormal(rows: list[dict], now: datetime) -> bool:
         now:  Reference timestamp (Bangkok-tz aware).
 
     Returns:
-        True if the offline-time condition is met, False otherwise.
+        The number of parseable recent offline rows.
     """
     # Truncate to minute precision: the scraped "Offline Time" has no seconds,
     # so we align the cutoff to the same resolution to make boundary inclusive.
@@ -57,6 +55,12 @@ def _check_offline_time_abnormal(rows: list[dict], now: datetime) -> bool:
             continue
         if cutoff <= offline_dt <= now_trunc:
             count += 1
+    return count
+
+
+def _check_offline_time_abnormal(rows: list[dict], now: datetime) -> bool:
+    """Return True when the recent offline-row threshold is reached."""
+    count = _count_recent_offline_rows(rows, now)
     result = count >= _OFFLINE_COUNT_THRESHOLD
     if result:
         logger.info(
@@ -169,6 +173,7 @@ async def check(
             details={
                 "online_status": online_status,
                 "row_count": len(rows),
+                "recent_offline_rows": _count_recent_offline_rows(rows, checked_at),
                 "output_file": str(output_file),
             },
             checked_at=checked_at,
